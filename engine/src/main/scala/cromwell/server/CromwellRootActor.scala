@@ -1,9 +1,10 @@
 package cromwell.server
 
 import akka.actor.SupervisorStrategy.{Escalate, Restart}
-import akka.actor.{Actor, ActorInitializationException, ActorRef, OneForOneStrategy}
+import akka.actor.{Actor, ActorInitializationException, ActorRef, OneForOneStrategy, PoisonPill, Terminated}
 import akka.event.Logging
 import akka.http.scaladsl.Http
+import akka.pattern.GracefulStopSupport
 import akka.routing.RoundRobinPool
 import akka.stream.ActorMaterializer
 import com.typesafe.config.ConfigFactory
@@ -20,6 +21,7 @@ import cromwell.docker.registryv2.flows.quay.QuayFlow
 import cromwell.engine.backend.{BackendSingletonCollection, CromwellBackends}
 import cromwell.engine.io.IoActor
 import cromwell.engine.workflow.WorkflowManagerActor
+import cromwell.engine.workflow.WorkflowManagerActor.AbortAllWorkflowsCommand
 import cromwell.engine.workflow.lifecycle.CopyWorkflowLogsActor
 import cromwell.engine.workflow.lifecycle.execution.callcaching.{CallCache, CallCacheReadActor, CallCacheWriteActor}
 import cromwell.engine.workflow.tokens.JobExecutionTokenDispenserActor
@@ -29,8 +31,10 @@ import cromwell.services.{ServiceRegistryActor, SingletonServicesStore}
 import cromwell.subworkflowstore.{SqlSubWorkflowStore, SubWorkflowStoreActor}
 import net.ceedubs.ficus.Ficus._
 
+import scala.concurrent.Future
 import scala.concurrent.duration._
 import scala.language.postfixOps
+import scala.util.{Failure, Success}
 
 /**
   * An actor which serves as the lord protector for the rest of Cromwell, allowing us to have more fine grain
@@ -42,13 +46,15 @@ import scala.language.postfixOps
   * If any of the actors created by CromwellRootActor fail to initialize the ActorSystem will die, which means that
   * Cromwell will fail to start in a bad state regardless of the entry point.
   */
- abstract class CromwellRootActor(implicit materializer: ActorMaterializer) extends Actor {
+abstract class CromwellRootActor(implicit materializer: ActorMaterializer) extends Actor {
   import CromwellRootActor._
 
   private val logger = Logging(context.system, this)
   private val config = ConfigFactory.load()
+  private var shuttingDown: Boolean = false
   private implicit val system = context.system
-  
+  private implicit val ec = context.dispatcher
+
   val serverMode: Boolean
 
   lazy val systemConfig = config.getConfig("system")
@@ -63,7 +69,7 @@ import scala.language.postfixOps
 
   lazy val subWorkflowStore = new SqlSubWorkflowStore(SingletonServicesStore.databaseInterface)
   lazy val subWorkflowStoreActor = context.actorOf(SubWorkflowStoreActor.props(subWorkflowStore), "SubWorkflowStoreActor")
-  
+
   // Io Actor
   lazy val throttleElements = systemConfig.as[Option[Int]]("io.number-of-requests").getOrElse(100000)
   lazy val throttlePer = systemConfig.as[Option[FiniteDuration]]("io.per").getOrElse(100 seconds)
@@ -83,13 +89,13 @@ import scala.language.postfixOps
     "CallCacheReadActor")
 
   lazy val callCacheWriteActor = context.actorOf(CallCacheWriteActor.props(callCache), "CallCacheWriteActor")
-  
+
   // Docker Actor
   lazy val ioEc = context.system.dispatchers.lookup(Dispatcher.IoDispatcher)
   lazy val dockerConf = DockerConfiguration.instance
   // Sets the number of requests that the docker actor will accept before it starts backpressuring (modulo the number of in flight requests)
   lazy val dockerActorQueueSize = 500
-  
+
   lazy val dockerHttpPool = Http().superPool[ContextWithRequest[DockerHashContext]]()
   lazy val googleFlow = new GoogleFlow(dockerHttpPool, dockerConf.gcrApiQueriesPer100Seconds)(ioEc, materializer, system.scheduler)
   lazy val dockerHubFlow = new DockerHubFlow(dockerHttpPool)(ioEc, materializer, system.scheduler)
@@ -110,14 +116,44 @@ import scala.language.postfixOps
 
   def abortJobsOnTerminate: Boolean
 
+  def gracefulShutdown: Boolean
+  
+  def preShutDown(): Future[Unit] = Future.successful(())
+
   lazy val workflowManagerActor = context.actorOf(
     WorkflowManagerActor.props(
       workflowStoreActor, ioActor, serviceRegistryActor, workflowLogCopyRouter, jobStoreActor, subWorkflowStoreActor, callCacheReadActor, callCacheWriteActor,
-    dockerHashActor, jobExecutionTokenDispenserActor, backendSingletonCollection, abortJobsOnTerminate, serverMode),
+      dockerHashActor, jobExecutionTokenDispenserActor, backendSingletonCollection, serverMode),
     "WorkflowManagerActor")
 
+  private var systemActorsToShutDown: Set[ActorRef] = Set(serviceRegistryActor, workflowStoreActor, jobStoreActor, subWorkflowStoreActor, workflowLogCopyRouter, callCacheWriteActor)
+
   override def receive = {
-    case _ => logger.error("CromwellRootActor is receiving a message. It prefers to be left alone!")
+    // Graceful shutdown
+    case ShutdownCommand if gracefulShutdown =>
+      shuttingDown = true
+      preShutDown() onComplete {
+        case Success(_) =>
+          context.watch(workflowManagerActor)
+          workflowManagerActor ! PoisonPill
+        case Failure(f) =>
+          logger.error("Failed to initiate graceful server shutdown. Stopping server in a non-graceful way.", f)
+      }
+    case Terminated(actor) if actor == workflowManagerActor && shuttingDown =>
+      logger.info("All workflow processing actors successfully stopped. Now stopping system level actors...")
+      systemActorsToShutDown foreach context.watch
+      systemActorsToShutDown foreach { _ ! PoisonPill }
+    case Terminated(actor) if systemActorsToShutDown.contains(actor) && shuttingDown =>
+      systemActorsToShutDown = systemActorsToShutDown - actor
+      logger.info(s"${actor.path.name} stopped.")
+      if (systemActorsToShutDown.isEmpty) {
+        logger.info("All system level actors successfully stopped. Stopping CromwellRootActor...")
+        context stop self
+      }
+
+    // Hard shutdown
+    case ShutdownCommand => context stop self
+    case _ => logger.error("Unknown message received by CromwellRootActor")
   }
 
   /**
@@ -131,7 +167,16 @@ import scala.language.postfixOps
   }
 }
 
-object CromwellRootActor {
+object CromwellRootActor extends GracefulStopSupport {
+  case object ShutdownCommand
+  private val GracefulShutdownTimeout = 30 seconds
+  private val AbortTimeout = 30 seconds
+  
+  def abort(cromwellRootActor: ActorRef): Future[Boolean] = gracefulStop(cromwellRootActor, AbortTimeout, AbortAllWorkflowsCommand)
+  def gracefullyStop(cromwellRootActor: ActorRef): Future[Boolean] = {
+    gracefulStop(cromwellRootActor, GracefulShutdownTimeout, CromwellRootActor.ShutdownCommand)
+  }
+  
   val DefaultNumberOfWorkflowLogCopyWorkers = 10
   val DefaultCacheTTL = 20 minutes
   val DefaultNumberOfCacheReadWorkers = 25

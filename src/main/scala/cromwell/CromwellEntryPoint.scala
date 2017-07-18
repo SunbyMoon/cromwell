@@ -1,5 +1,6 @@
 package cromwell
 
+import akka.pattern.GracefulStopSupport
 import cats.data.Validated._
 import cats.syntax.cartesian._
 import cats.syntax.validated._
@@ -9,9 +10,10 @@ import cromwell.core.path.Path
 import cromwell.core.{WorkflowSourceFilesCollection, WorkflowSourceFilesWithDependenciesZip, WorkflowSourceFilesWithoutImports}
 import cromwell.engine.workflow.SingleWorkflowRunnerActor
 import cromwell.engine.workflow.SingleWorkflowRunnerActor.RunWorkflow
-import cromwell.server.{CromwellServer, CromwellSystem}
+import cromwell.server.{CromwellRootActor, CromwellServer, CromwellSystem}
 import lenthall.exception.MessageAggregation
 import lenthall.validation.ErrorOr._
+import net.ceedubs.ficus.Ficus._
 import org.slf4j.LoggerFactory
 
 import scala.collection.JavaConverters._
@@ -20,14 +22,22 @@ import scala.concurrent.{Await, Future, TimeoutException}
 import scala.language.postfixOps
 import scala.util.{Failure, Success, Try}
 
+object CromwellEntryPoint extends GracefulStopSupport {
 
-object CromwellEntryPoint {
+  lazy val EntryPointLogger = LoggerFactory.getLogger("Cromwell EntryPoint")
+  private lazy val config = ConfigFactory.load()
+
+  // Only abort jobs on SIGINT if the config explicitly sets system.abort-jobs-on-terminate = true.
+  val abortJobsOnTerminate = config.as[Boolean]("system.abort-jobs-on-terminate")
+
+  val gracefulShutdown = config.as[Boolean]("system.graceful-shutdown")
 
   /**
     * Run Cromwell in server mode.
     */
   def runServer() = {
     val system = buildCromwellSystem(Server)
+    addShutdownHook(CromwellServer.abort _, CromwellServer.gracefullyStop _)
     waitAndExit(CromwellServer.run, system)
   }
 
@@ -43,8 +53,24 @@ object CromwellEntryPoint {
 
     val runner = cromwellSystem.actorSystem.actorOf(runnerProps, "SingleWorkflowRunnerActor")
 
+    addShutdownHook(() => CromwellRootActor.abort(runner), () => CromwellRootActor.gracefullyStop(runner))
+
     import cromwell.util.PromiseActor.EnhancedActorRef
     waitAndExit(_ => runner.askNoTimeout(RunWorkflow), cromwellSystem)
+  }
+
+  private def addShutdownHook(abort: () => Future[Boolean], gracefullyStop: () => Future[Boolean]): Unit = {
+    if (abortJobsOnTerminate || gracefulShutdown) sys.addShutdownHook {
+      EntryPointLogger.info("Received shutdown signal.")
+      val shutdownFuture = if (abortJobsOnTerminate) abort()
+      else if (gracefulShutdown) gracefullyStop()
+
+      else Future.successful(true)
+
+      Await.result(shutdownFuture, Duration.Inf)
+      ()
+    }
+    ()
   }
 
   private def buildCromwellSystem(command: Command): CromwellSystem = {
@@ -60,6 +86,7 @@ object CromwellEntryPoint {
         Failure(t)
     } get
   }
+
   /**
     * If a cromwell server is going to be run, makes adjustments to the default logback configuration.
     * Overwrites LOG_MODE system property used in our logback.xml, _before_ the logback classes load.
@@ -81,13 +108,13 @@ object CromwellEntryPoint {
       "LOG_LEVEL" -> "INFO"
     )
 
-    val config = ConfigFactory.load
+    val configWithFallbacks = config
       .withFallback(ConfigFactory.systemEnvironment())
       .withFallback(ConfigFactory.parseMap(defaultProps.asJava, "Defaults"))
 
     val props = sys.props
     defaultProps.keys foreach { key =>
-      props += key -> config.getString(key)
+      props += key -> configWithFallbacks.getString(key)
     }
 
     /*

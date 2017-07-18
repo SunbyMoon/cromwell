@@ -92,7 +92,6 @@ case class WorkflowExecutionActor(workflowDescriptor: EngineWorkflowDescriptor,
       //Success
         // Job
     case Event(r: JobSucceededResponse, stateData) =>
-      pushSuccessfulCallMetadata(r.jobKey, r.returnCode, r.jobOutputs)
       handleCallSuccessful(r.jobKey, r.jobOutputs, stateData, Map.empty)
         // Sub Workflow
     case Event(SubWorkflowSucceededResponse(jobKey, descendantJobKeys, callOutputs), stateData) =>
@@ -150,34 +149,15 @@ case class WorkflowExecutionActor(workflowDescriptor: EngineWorkflowDescriptor,
     FSM.NullFunction
   }
   when(WorkflowExecutionFailedState) {
-    alreadyFailedMopUp
+    FSM.NullFunction
   }
   when(WorkflowExecutionAbortedState) {
-    alreadyFailedMopUp
+    FSM.NullFunction
   }
 
   private def scheduleStartRunnableCalls() = {
     context.system.scheduler.scheduleOnce(SweepInterval, self, CheckRunnable)
   }
-
-  /**
-    * Mop up function to handle a set of incoming results if this workflow has already failed:
-    */
-  private def alreadyFailedMopUp: StateFunction = {
-    case Event(JobInitializationFailed(jobKey, reason), _) =>
-      pushFailedCallMetadata(jobKey, None, reason, retryableFailure = false)
-      stay
-    case Event(JobFailedNonRetryableResponse(jobKey, reason, returnCode), _) =>
-      pushFailedCallMetadata(jobKey, returnCode, reason, retryableFailure = false)
-      stay
-    case Event(JobFailedRetryableResponse(jobKey, reason, returnCode), _) =>
-      pushFailedCallMetadata(jobKey, returnCode, reason, retryableFailure = true)
-      stay
-    case Event(r: JobSucceededResponse, _) =>
-      pushSuccessfulCallMetadata(r.jobKey, r.returnCode, r.jobOutputs)
-      stay
-  }
-
 
   def handleTerminated(actorRef: ActorRef) = {
     // Both of these Should Never Happen (tm), assuming the state data is set correctly on EJEA creation.

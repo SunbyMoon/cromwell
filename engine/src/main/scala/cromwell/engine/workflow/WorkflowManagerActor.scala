@@ -20,7 +20,6 @@ import net.ceedubs.ficus.Ficus._
 import org.apache.commons.lang3.exception.ExceptionUtils
 
 import scala.concurrent.duration._
-import scala.sys.ShutdownHookThread
 
 object WorkflowManagerActor {
   val DefaultMaxWorkflowsToRun = 5000
@@ -52,11 +51,10 @@ object WorkflowManagerActor {
             dockerHashActor: ActorRef,
             jobTokenDispenserActor: ActorRef,
             backendSingletonCollection: BackendSingletonCollection,
-            abortJobsOnTerminate: Boolean,
             serverMode: Boolean): Props = {
     val params = WorkflowManagerActorParams(ConfigFactory.load, workflowStore, ioActor, serviceRegistryActor,
-      workflowLogCopyRouter, jobStoreActor, subWorkflowStoreActor, callCacheReadActor, callCacheWriteActor, dockerHashActor, jobTokenDispenserActor, backendSingletonCollection,
-      abortJobsOnTerminate, serverMode)
+      workflowLogCopyRouter, jobStoreActor, subWorkflowStoreActor, callCacheReadActor, callCacheWriteActor,
+      dockerHashActor, jobTokenDispenserActor, backendSingletonCollection, serverMode)
     Props(new WorkflowManagerActor(params)).withDispatcher(EngineDispatcher)
   }
 
@@ -100,7 +98,6 @@ case class WorkflowManagerActorParams(config: Config,
                                       dockerHashActor: ActorRef,
                                       jobTokenDispenserActor: ActorRef,
                                       backendSingletonCollection: BackendSingletonCollection,
-                                      abortJobsOnTerminate: Boolean,
                                       serverMode: Boolean)
 
 class WorkflowManagerActor(params: WorkflowManagerActorParams)
@@ -117,46 +114,10 @@ class WorkflowManagerActor(params: WorkflowManagerActorParams)
   private val tag = self.path.name
 
   private var abortingWorkflowToReplyTo = Map.empty[WorkflowId, ActorRef]
-  private var shutdownHookThreadOption: Option[ShutdownHookThread] = None
 
   override def preStart(): Unit = {
-    addShutdownHook()
     // Starts the workflow polling cycle
     self ! RetrieveNewWorkflows
-  }
-
-  override def postStop() = {
-    // If the actor is stopping, especially during error tests, then there's nothing to wait for later at JVM shutdown.
-    tryRemoveShutdownHook()
-    super.postStop()
-  }
-
-  private def addShutdownHook() = {
-    // Only abort jobs on SIGINT if the config explicitly sets system.abort-jobs-on-terminate = true.
-    val abortJobsOnTerminate =
-    config.getConfig("system").as[Option[Boolean]]("abort-jobs-on-terminate").getOrElse(params.abortJobsOnTerminate)
-
-    if (abortJobsOnTerminate) {
-      val shutdownHookThread = sys.addShutdownHook {
-        logger.info(s"$tag: Received shutdown signal.")
-        self ! AbortAllWorkflowsCommand
-        while (stateData != null && stateData.workflows.nonEmpty) {
-          log.info(s"Waiting for ${stateData.workflows.size} workflows to abort...")
-          Thread.sleep(1000)
-        }
-      }
-      shutdownHookThreadOption = Option(shutdownHookThread)
-    }
-  }
-
-  private def tryRemoveShutdownHook() = {
-    try {
-      shutdownHookThreadOption.foreach(_.remove())
-    } catch {
-      case _: IllegalStateException => /* ignore, we're probably shutting down */
-      case exception: Exception => log.error(exception, "Error while removing shutdown hook: {}", exception.getMessage)
-    }
-    shutdownHookThreadOption = None
   }
 
   startWith(Running, WorkflowManagerData(workflows = Map.empty))

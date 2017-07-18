@@ -280,6 +280,7 @@ object CromwellTestKitSpec {
     override lazy val serviceRegistryActor = ServiceRegistryActorInstance
     override lazy val workflowStore = new InMemoryWorkflowStore
     override val abortJobsOnTerminate = false
+    override val gracefulShutdown = false
     def submitWorkflow(sources: WorkflowSourceFilesWithoutImports): WorkflowId = {
       val submitMessage = WorkflowStoreActor.SubmitWorkflow(sources)
       val result = Await.result(workflowStoreActor.ask(submitMessage)(TimeoutDuration), Duration.Inf).asInstanceOf[WorkflowSubmittedToStore].workflowId

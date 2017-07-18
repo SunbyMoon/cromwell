@@ -78,7 +78,6 @@ abstract class SingleWorkflowRunnerActorSpec extends CromwellTestKitWordSpec wit
       dockerHashActor = dockerHashActor,
       jobTokenDispenserActor = jobTokenDispenserActor,
       backendSingletonCollection = BackendSingletonCollection(Map.empty),
-      abortJobsOnTerminate = false,
       serverMode = false)
     system.actorOf(Props(new WorkflowManagerActor(params)), "WorkflowManagerActor")
   }

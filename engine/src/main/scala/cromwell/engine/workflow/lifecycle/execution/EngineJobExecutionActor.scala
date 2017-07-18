@@ -586,6 +586,7 @@ class EngineJobExecutionActor(replyTo: ActorRef,
     val jobStoreKey = jobKey.toJobStoreKey(workflowIdForLogging)
     val jobStoreResult = JobResultSuccess(returnCode, outputs)
     jobStoreActor ! RegisterJobCompleted(jobStoreKey, jobStoreResult)
+    pushSuccessfulCallMetadata(jobKey, returnCode, outputs)
   }
 
   private def saveUnsuccessfulJobResults(jobKey: JobKey, returnCode: Option[Int], reason: Throwable, retryable: Boolean) = {

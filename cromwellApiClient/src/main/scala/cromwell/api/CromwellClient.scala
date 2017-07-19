@@ -29,12 +29,21 @@ class CromwellClient(val cromwellUrl: URL, val apiVersion: String)(implicit acto
   def abortEndpoint(workflowId: WorkflowId): String = workflowSpecificEndpoint(workflowId, "abort")
   def statusEndpoint(workflowId: WorkflowId): String = workflowSpecificEndpoint(workflowId, "status")
   def metadataEndpoint(workflowId: WorkflowId): String = workflowSpecificEndpoint(workflowId, "metadata")
+  def outputsEndpoint(workflowId: WorkflowId): String = workflowSpecificEndpoint(workflowId, "outputs")
+  def logsEndpoint(workflowId: WorkflowId): String = workflowSpecificEndpoint(workflowId, "logs")
+  def diffEndpoint(workflowA: WorkflowId, callA: String, indexA: ShardIndex, workflowB: WorkflowId, callB: String, indexB: ShardIndex): String = {
+    def shardParam(aOrB: String, s: ShardIndex) = s.index.map(i => s"&index$aOrB=$i.toString").getOrElse("")
+    s"$submitEndpoint/callcaching/diff?workflowA=$workflowA&callA=$callA&workflowB=$workflowB&callB=$callB${shardParam("A", indexA)}${shardParam("B", indexB)}"
+  }
   lazy val backendsEndpoint = s"$submitEndpoint/backends"
   lazy val versionEndpoint = s"$engineEndpoint/version"
 
   import model.CromwellStatusJsonSupport._
+  import model.WorkflowOutputsJsonSupport._
+  import model.WorkflowLogsJsonSupport._
   import model.CromwellBackendsJsonSupport._
   import model.CromwellVersionJsonSupport._
+  import model.CallCacheDiffJsonSupport._
 
   private def requestEntityForSubmit(workflowSubmission: WorkflowSubmission) = {
     import cromwell.api.model.LabelsJsonFormatter._
@@ -90,6 +99,10 @@ class CromwellClient(val cromwellUrl: URL, val apiVersion: String)(implicit acto
   def abort(workflowId: WorkflowId)(implicit ec: ExecutionContext): Future[WorkflowStatus] = getRequest[CromwellStatus](abortEndpoint(workflowId)) map WorkflowStatus.apply
   def status(workflowId: WorkflowId)(implicit ec: ExecutionContext): Future[WorkflowStatus] = getRequest[CromwellStatus](statusEndpoint(workflowId)) map WorkflowStatus.apply
   def metadata(workflowId: WorkflowId)(implicit ec: ExecutionContext): Future[WorkflowMetadata] = getRequest[String](metadataEndpoint(workflowId)) map WorkflowMetadata
+  def outputs(workflowId: WorkflowId)(implicit ec: ExecutionContext): Future[WorkflowOutputs] = getRequest[WorkflowOutputs](outputsEndpoint(workflowId))
+  def logs(workflowId: WorkflowId)(implicit ec: ExecutionContext): Future[WorkflowLogs] = getRequest[WorkflowLogsStruct](outputsEndpoint(workflowId)) map WorkflowLogs.apply
+  def callCacheDiff(workflowA: WorkflowId, callA: String, shardIndexA: ShardIndex, workflowB: WorkflowId, callB: String, shardIndexB: ShardIndex)(implicit ec: ExecutionContext) =
+    getRequest[CallCacheDiff](diffEndpoint(workflowA, callA, shardIndexA, workflowB, callB, shardIndexB))
   def backends(implicit ec: ExecutionContext): Future[CromwellBackends] = getRequest[CromwellBackends](backendsEndpoint)
   def version(implicit ec: ExecutionContext): Future[CromwellVersion] = getRequest[CromwellVersion](versionEndpoint)
 

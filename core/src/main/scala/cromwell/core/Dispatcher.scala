@@ -6,4 +6,5 @@ object Dispatcher {
   val ApiDispatcher = "akka.dispatchers.api-dispatcher"
   val BackendDispatcher = "akka.dispatchers.backend-dispatcher"
   val ServiceDispatcher = "akka.dispatchers.service-dispatcher"
+  val HealthMonitorDispatcher = "akka.dispatchers.health-monitor-dispatcher"
 }

@@ -29,7 +29,7 @@ object MetadataServiceActor {
 
 case class MetadataServiceActor(serviceConfig: Config, globalConfig: Config)
   extends Actor with ActorLogging with MetadataDatabaseAccess with SingletonServicesStore {
-  
+
   private val decider: Decider = {
     case _: ActorInitializationException => Escalate
     case _ => Resume

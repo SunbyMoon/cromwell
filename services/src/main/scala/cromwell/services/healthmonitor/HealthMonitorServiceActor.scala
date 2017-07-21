@@ -13,15 +13,7 @@ import scala.concurrent.duration._
 import scala.util.control.NonFatal
 import scala.language.postfixOps
 import HealthMonitorServiceActor._
-
-/*
-  Checks:
-
-  PAPI (if backend exists)
-  GCS (if filesystem exists)
-  DB
-  Dockerhub (if exists)
- */
+import cromwell.services.ServiceRegistryActor.ServiceRegistryMessage
 
 trait HealthMonitorServiceActor extends Actor with LazyLogging {
   def subsystems: List[Subsystem]
@@ -104,7 +96,6 @@ trait HealthMonitorServiceActor extends Actor with LazyLogging {
     def withTimeout(duration: FiniteDuration, errMsg: String): Future[A] =
       Future.firstCompletedOf(Seq(f, after(duration, context.system.scheduler)(Future.failed(new TimeoutException(errMsg)))))
   }
-
 }
 
 object HealthMonitorServiceActor {
@@ -121,7 +112,7 @@ object HealthMonitorServiceActor {
   sealed abstract class HealthMonitorServiceActorRequest
   case object CheckAll extends HealthMonitorServiceActorRequest
   final case class Store(subsystem: Subsystem, status: SubsystemStatus) extends HealthMonitorServiceActorRequest
-  case object GetCurrentStatus extends HealthMonitorServiceActorRequest
+  case object GetCurrentStatus extends HealthMonitorServiceActorRequest with ServiceRegistryMessage { override val serviceName = "HealthMonitor" }
 
   sealed abstract class HealthMonitorServiceActorResponse
   final case class StatusCheckResponse(ok: Boolean, systems: Map[Subsystem, SubsystemStatus]) extends HealthMonitorServiceActorResponse
